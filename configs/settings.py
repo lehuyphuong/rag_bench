@@ -1,22 +1,18 @@
 """
-Central configuration for rag-bench v3.
+Central configuration for rag-bench v4.
 
-Reproduces Berdyugina et al. (arXiv:2604.24334) chunk filtering experiments.
-
-Changes from v2 baseline:
-  - Embedding  : all-MiniLM-L6-v2 via sentence-transformers (384-dim, no Ollama)
-  - Retrieval  : dense-only cosine similarity (no BM25 hybrid)
-  - Filtering  : ExactNorm, MinHashLSH(0.7), Similarity(0.8), NERExact
-  - Chunking   : 3 strategies × paper configs (FixedToken, RecursiveToken, ClusterSemantic)
-  - Dataset    : SQuAD 1.1 validation split
-
-Pipeline:
-    load → chunk → [filter] → embed → index → retrieve → evaluate
+Changes from v3:
+  - Chunking strategies replaced with 5 new strategies:
+      AdaptiveEntropy, AdaptiveSentenceLen,
+      HierarchicalParentChild, Contextual, TopicBased
+  - Evaluation metrics reduced to 4 paper-core metrics:
+      Precision, Recall, IoU, Index Size
+  - Oracle and generation metrics removed
 """
 
 from pathlib import Path
 
-# ── Paths ───────────────────────────────────────────────────────────────────
+# ── Paths ────────────────────────────────────────────────────────────────────
 ROOT_DIR    = Path(__file__).resolve().parent.parent
 DATA_DIR    = ROOT_DIR / "data"
 RESULTS_DIR = ROOT_DIR / "results"
@@ -26,27 +22,24 @@ DATA_DIR.mkdir(exist_ok=True)
 RESULTS_DIR.mkdir(exist_ok=True)
 QDRANT_PATH.mkdir(exist_ok=True)
 
-# ── Dataset ─────────────────────────────────────────────────────────────────
-DATASET_NAME        = "rajpurkar/squad"
-DATASET_SPLIT       = "validation"
-MAX_DOCUMENTS: int | None = 500       # None = full SQuAD val (~2,067 passages)
-MAX_EVAL_QUESTIONS: int | None = 200  # questions used in evaluation
+# ── Dataset ──────────────────────────────────────────────────────────────────
+DATASET_NAME       = "rajpurkar/squad"
+DATASET_SPLIT      = "validation"
+MAX_DOCUMENTS:       int | None = 500
+MAX_EVAL_QUESTIONS:  int | None = 200
 
-# ── Embedding — all-MiniLM-L6-v2 (sentence-transformers) ───────────────────
-# Paper Section 3.4: "all-MiniLM-L6-v2 … chosen as the reference model
-# because it offers a good balance between speed, reproducibility, and
-# computational cost."
-EMBED_MODEL     = "sentence-transformers/all-MiniLM-L6-v2"
-TEXT_EMBED_DIM  = 384
+# ── Embedding — all-MiniLM-L6-v2 ─────────────────────────────────────────────
+EMBED_MODEL      = "sentence-transformers/all-MiniLM-L6-v2"
+TEXT_EMBED_DIM   = 384
 EMBED_BATCH_SIZE = 128
 
-# ── Qdrant (in-process / embedded mode — no Docker) ─────────────────────────
-COLLECTION_PREFIX = "squad_bench_v3"
+# ── Qdrant (embedded, no Docker) ─────────────────────────────────────────────
+COLLECTION_PREFIX = "squad_bench_v4"
 
-# ── Retrieval — dense only (paper Section 3.4) ──────────────────────────────
+# ── Retrieval ─────────────────────────────────────────────────────────────────
 TOP_K = 5
 
-# ── LLM (Ollama — generation only, not used for embedding) ──────────────────
+# ── LLM (Ollama — optional, only for generation) ─────────────────────────────
 OLLAMA_BASE_URL = "http://localhost:11434"
 LLM_MODEL       = "mistral"
 LLM_TEMPERATURE = 0.0
@@ -58,52 +51,49 @@ ONLY the provided context passages. Be concise — answer in 1-3 sentences. \
 If the answer is not in the context, respond with exactly: "I don't know."\
 """
 
-# ── Evaluation ───────────────────────────────────────────────────────────────
-ORACLE_K       = 5
-EVAL_LANGUAGE  = "english"
+# ── Chunking + Filtering configurations ──────────────────────────────────────
+#
+# 5 new chunking strategies × 5 filter methods = 50 configs
+#
+# Strategy params:
+#   chunk_size : target chunk size in characters (base unit)
+#   overlap    : character overlap between chunks (0 for strategies that
+#                don't use sliding windows)
+#   extra      : strategy-specific overrides (optional)
+#
+# Filter methods (unchanged from v3):
+#   NoFilter, ExactNorm, MinHashLSH(0.7), Similarity(0.8), NERExact
 
-# ── Chunking + Filtering configurations ─────────────────────────────────────
-#
-# Paper Section 3.3: FixedToken, RecursiveToken, ClusterSemantic
-# Paper Section 3.5 filtering strategies evaluated:
-#   - No filtering      (baseline)
-#   - ExactNorm         (lexical exact dedup after normalization)
-#   - MinHashLSH        (threshold 0.7 — paper tests 0.6/0.7/0.8, 0.7 balanced)
-#   - Similarity        (cosine threshold 0.8 — paper "most stable" threshold)
-#   - NERExact          (drop chunks with identical named-entity set)
-#
-# Each config:
-#   strategy  : "FixedToken" | "RecursiveToken" | "ClusterSemantic"
-#   chunk_size: int (characters)
-#   overlap   : int (characters)
-#   filtering : list[dict]  — pipeline steps applied after chunking
-#
-# Filtering step format:
-#   {"method": "NoFilter"}
-#   {"method": "ExactNorm"}
-#   {"method": "MinHashLSH",  "threshold": 0.7}
-#   {"method": "Similarity",  "threshold": 0.8}
-#   {"method": "NERExact"}
-
-def _make_configs():
-    """
-    Generate all (chunker × filter) combinations following the paper.
-    Each chunking config is paired with each filtering strategy.
-    """
+def _make_configs() -> list[dict]:
     chunker_configs = [
-        # ── FixedToken ────────────────────────────────────────────────────
-        {"strategy": "FixedToken",      "chunk_size": 200, "overlap": 0},
-        {"strategy": "FixedToken",      "chunk_size": 400, "overlap": 0},
-        {"strategy": "FixedToken",      "chunk_size": 400, "overlap": 200},
-        {"strategy": "FixedToken",      "chunk_size": 800, "overlap": 400},
-        # ── RecursiveToken ────────────────────────────────────────────────
-        {"strategy": "RecursiveToken",  "chunk_size": 200, "overlap": 0},
-        {"strategy": "RecursiveToken",  "chunk_size": 400, "overlap": 0},
-        {"strategy": "RecursiveToken",  "chunk_size": 400, "overlap": 200},
-        {"strategy": "RecursiveToken",  "chunk_size": 800, "overlap": 400},
-        # ── ClusterSemantic ───────────────────────────────────────────────
-        {"strategy": "ClusterSemantic", "chunk_size": 200, "overlap": 0},
-        {"strategy": "ClusterSemantic", "chunk_size": 400, "overlap": 0},
+        # ── AdaptiveEntropy ─────────────────────────────────────────────────
+        # base_size drives the lerp range; min/max derived as base//3 and base*2
+        {"strategy": "AdaptiveEntropy",       "chunk_size": 300, "overlap": 0},
+        {"strategy": "AdaptiveEntropy",       "chunk_size": 500, "overlap": 0},
+
+        # ── AdaptiveSentenceLen ──────────────────────────────────────────────
+        # target_sentences controls the expected group size
+        {"strategy": "AdaptiveSentenceLen",   "chunk_size": 4,   "overlap": 0,
+         "extra": {"target_sentences": 4, "min_sentences": 2, "max_sentences": 8}},
+        {"strategy": "AdaptiveSentenceLen",   "chunk_size": 6,   "overlap": 0,
+         "extra": {"target_sentences": 6, "min_sentences": 3, "max_sentences": 12}},
+
+        # ── HierarchicalParentChild ──────────────────────────────────────────
+        # chunk_size = child size; parent_size = child_size * 2 (set in extra)
+        {"strategy": "HierarchicalParentChild", "chunk_size": 200, "overlap": 0,
+         "extra": {"parent_size": 600}},
+        {"strategy": "HierarchicalParentChild", "chunk_size": 400, "overlap": 0,
+         "extra": {"parent_size": 800}},
+
+        # ── Contextual ───────────────────────────────────────────────────────
+        {"strategy": "Contextual",            "chunk_size": 300, "overlap": 0},
+        {"strategy": "Contextual",            "chunk_size": 500, "overlap": 0},
+
+        # ── TopicBased ───────────────────────────────────────────────────────
+        {"strategy": "TopicBased",            "chunk_size": 200, "overlap": 0,
+         "extra": {"n_topics": 4, "min_chunk_size": 100}},
+        {"strategy": "TopicBased",            "chunk_size": 400, "overlap": 0,
+         "extra": {"n_topics": 6, "min_chunk_size": 200}},
     ]
 
     filter_configs = [
@@ -117,12 +107,16 @@ def _make_configs():
     configs = []
     for chunker in chunker_configs:
         for filtering in filter_configs:
-            configs.append({
+            cfg = {
                 "strategy":   chunker["strategy"],
                 "chunk_size": chunker["chunk_size"],
                 "overlap":    chunker["overlap"],
                 "filtering":  filtering,
-            })
+            }
+            if "extra" in chunker:
+                cfg["extra"] = chunker["extra"]
+            configs.append(cfg)
+
     return configs
 
 

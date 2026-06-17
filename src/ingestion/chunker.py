@@ -1,12 +1,9 @@
 """
-Chunking strategies following Berdyugina et al. (arXiv:2604.24334):
+Chunking strategies following Berdyugina et al. (arXiv:2604.24334) Section 3.3.
 
   FixedTokenChunker     : fixed-size character windows with optional overlap.
-  RecursiveTokenChunker : hierarchical splitting (paragraphs → sentences →
-                          words), then recursively splits oversized segments.
-  ClusterSemanticChunker: embeds sentences, groups consecutive sentences by
-                          cosine-similarity shifts (breakpoints), merges
-                          until max_chunk_size is reached.
+  RecursiveTokenChunker : hierarchical splitting (paragraphs → sentences → words).
+  ClusterSemanticChunker: embeds sentences, groups by cosine-similarity breakpoints.
 
 Each chunker returns a list of chunk dicts:
   {
@@ -14,7 +11,7 @@ Each chunker returns a list of chunk dicts:
     "doc_id"    : str,
     "title"     : str,
     "text"      : str,
-    "char_start": int,   # character offset in original document
+    "char_start": int,
     "char_end"  : int,
   }
 """
@@ -34,7 +31,8 @@ from langchain_text_splitters import (
 
 logger = logging.getLogger(__name__)
 
-# ── helpers ─────────────────────────────────────────────────────────────────
+
+# ── helpers ──────────────────────────────────────────────────────────────────
 
 def _sentence_split(text: str) -> list[str]:
     """Simple sentence splitter (no NLTK dependency)."""
@@ -42,9 +40,7 @@ def _sentence_split(text: str) -> list[str]:
     return [p for p in parts if p.strip()]
 
 
-def _make_chunks(
-    doc: dict, spans: list[tuple[int, int]]
-) -> list[dict]:
+def _make_chunks(doc: dict, spans: list[tuple[int, int]]) -> list[dict]:
     """Convert (start, end) character spans into chunk dicts."""
     chunks = []
     text = doc["text"]
@@ -53,17 +49,17 @@ def _make_chunks(
         if not chunk_text:
             continue
         chunks.append({
-            "chunk_id": f"{doc['doc_id']}_{i}",
-            "doc_id": doc["doc_id"],
-            "title": doc["title"],
-            "text": chunk_text,
+            "chunk_id":   f"{doc['doc_id']}_{i}",
+            "doc_id":     doc["doc_id"],
+            "title":      doc["title"],
+            "text":       chunk_text,
             "char_start": s,
-            "char_end": e,
+            "char_end":   e,
         })
     return chunks
 
 
-# ── FixedTokenChunker ────────────────────────────────────────────────────────
+# ── FixedTokenChunker ─────────────────────────────────────────────────────────
 
 def fixed_token_chunker(
     doc: dict, chunk_size: int = 400, overlap: int = 0
@@ -71,7 +67,6 @@ def fixed_token_chunker(
     """
     Split document into fixed-size character windows.
     Equivalent to FixedTokenChunker in Berdyugina et al.
-    Uses CharacterTextSplitter with separator="" (character-level).
     """
     splitter = CharacterTextSplitter(
         chunk_size=chunk_size,
@@ -82,7 +77,6 @@ def fixed_token_chunker(
     text = doc["text"]
     raw_chunks = splitter.split_text(text)
 
-    # Reconstruct char offsets
     spans = []
     cursor = 0
     for rc in raw_chunks:
@@ -95,14 +89,13 @@ def fixed_token_chunker(
     return _make_chunks(doc, spans)
 
 
-# ── RecursiveTokenChunker ────────────────────────────────────────────────────
+# ── RecursiveTokenChunker ─────────────────────────────────────────────────────
 
 def recursive_token_chunker(
     doc: dict, chunk_size: int = 400, overlap: int = 0
 ) -> list[dict]:
     """
-    Recursive splitting: tries paragraph → sentence → word separators,
-    splitting further only when a segment exceeds chunk_size.
+    Recursive splitting: paragraph → sentence → word separators.
     Equivalent to RecursiveTokenChunker in Berdyugina et al.
     """
     splitter = RecursiveCharacterTextSplitter(
@@ -126,7 +119,7 @@ def recursive_token_chunker(
     return _make_chunks(doc, spans)
 
 
-# ── ClusterSemanticChunker ───────────────────────────────────────────────────
+# ── ClusterSemanticChunker ────────────────────────────────────────────────────
 
 def cluster_semantic_chunker(
     doc: dict,
@@ -141,19 +134,14 @@ def cluster_semantic_chunker(
 
     Algorithm:
       1. Split document into sentences.
-      2. Embed each sentence (via embed_fn).
+      2. Embed each sentence.
       3. Compute cosine distance between consecutive sentence embeddings.
       4. Split at distances above the breakpoint_percentile threshold.
       5. Merge consecutive semantic groups until max chunk_size is reached.
-
-    Args:
-        embed_fn: callable(texts) → list of float vectors. If None, falls
-                  back to RecursiveToken (for unit-testing without a model).
-        breakpoint_percentile: percentile of distances used as split threshold.
     """
     if embed_fn is None:
         logger.warning(
-            "ClusterSemantic: no embed_fn provided, falling back to RecursiveToken."
+            "ClusterSemantic: no embed_fn — falling back to RecursiveToken."
         )
         return recursive_token_chunker(doc, chunk_size=chunk_size, overlap=overlap)
 
@@ -163,8 +151,8 @@ def cluster_semantic_chunker(
     if len(sentences) <= 1:
         return _make_chunks(doc, [(0, len(text))])
 
-    # ── Step 1: embed all sentences ──────────────────────────────────────
-    vectors = embed_fn(sentences)   # list[list[float]]
+    # Step 1: embed all sentences
+    vectors = embed_fn(sentences)
     vecs = np.array(vectors, dtype=np.float32)
 
     # Normalize for cosine similarity
@@ -172,20 +160,15 @@ def cluster_semantic_chunker(
     norms = np.where(norms == 0, 1e-9, norms)
     vecs = vecs / norms
 
-    # ── Step 2: pairwise distances between consecutive sentences ─────────
-    # cosine distance = 1 - cosine_similarity
+    # Step 2: pairwise distances between consecutive sentences
     dots = np.sum(vecs[:-1] * vecs[1:], axis=1)
     distances = 1.0 - dots
 
-    # ── Step 3: find breakpoints ─────────────────────────────────────────
+    # Step 3: find breakpoints
     threshold = float(np.percentile(distances, breakpoint_percentile))
-    breakpoints = set(
-        i + 1
-        for i, d in enumerate(distances)
-        if d >= threshold
-    )
+    breakpoints = {i + 1 for i, d in enumerate(distances) if d >= threshold}
 
-    # ── Step 4: group sentences into semantic groups ──────────────────────
+    # Step 4: group sentences into semantic groups
     groups: list[list[str]] = []
     current: list[str] = [sentences[0]]
     for i, sent in enumerate(sentences[1:], start=1):
@@ -196,7 +179,7 @@ def cluster_semantic_chunker(
             current.append(sent)
     groups.append(current)
 
-    # ── Step 5: merge groups until chunk_size is respected ───────────────
+    # Step 5: merge groups until chunk_size is respected
     final_texts: list[str] = []
     current_text = ""
     for group in groups:
@@ -208,7 +191,6 @@ def cluster_semantic_chunker(
             if current_text:
                 final_texts.append(current_text)
             current_text = group_text
-
     if current_text:
         final_texts.append(current_text)
 
@@ -216,7 +198,7 @@ def cluster_semantic_chunker(
     spans = []
     cursor = 0
     for ft in final_texts:
-        idx = text.find(ft[:30], cursor)   # search by prefix to handle minor whitespace diffs
+        idx = text.find(ft[:30], cursor)
         if idx == -1:
             idx = cursor
         spans.append((idx, idx + len(ft)))
@@ -225,7 +207,7 @@ def cluster_semantic_chunker(
     return _make_chunks(doc, spans)
 
 
-# ── Registry ─────────────────────────────────────────────────────────────────
+# ── Registry ──────────────────────────────────────────────────────────────────
 
 def get_chunker(strategy: str, chunk_size: int, overlap: int, embed_fn=None):
     """Return a callable(doc) → list[chunk] for the given strategy."""
@@ -250,9 +232,7 @@ def chunk_documents(
 ) -> tuple[list[dict], float]:
     """
     Chunk all documents with the given strategy.
-
     Returns (chunks, elapsed_seconds).
-    elapsed_seconds includes only chunking time (not embedding for ClusterSemantic).
     """
     chunker = get_chunker(strategy, chunk_size, overlap, embed_fn=embed_fn)
     t0 = time.perf_counter()

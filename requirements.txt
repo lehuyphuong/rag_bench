@@ -1,6 +1,7 @@
-# rag-bench v2 dependencies
+# rag-bench v3 dependencies
 # Python 3.10+
-# No Docker or root required — Qdrant runs in-process (embedded mode)
+# Dense-only retrieval with all-MiniLM-L6-v2 + Qdrant embedded (no Docker)
+# Reproduces Berdyugina et al. (arXiv:2604.24334) filtering experiments on SQuAD 1.1
 
 # Dataset
 datasets>=2.19.0
@@ -9,25 +10,22 @@ huggingface-hub>=0.23.0
 # Chunking
 langchain-text-splitters>=0.2.0
 
-# HTTP (Ollama API)
-httpx>=0.27.0
+# Embedding — sentence-transformers (all-MiniLM-L6-v2, 384-dim)
+sentence-transformers>=3.0.0
+torch>=2.1.0
 
-# Vector store (in-process embedded mode)
+# Vector store (in-process embedded mode, no Docker)
 qdrant-client>=1.9.0
 
-# NLP preprocessing (preprocessed eval mode — lemmatize + stopwords)
+# NLP — spaCy for NER (NERExact filter) + preprocessed eval mode
 spacy>=3.7.0
 # After install: python -m spacy download en_core_web_sm
 
-# Numerics (ClusterSemantic chunker)
+# Deduplication — MinHash-LSH (Berdyugina et al. lexical baseline)
+datasketch>=1.6.0
+
+# Numerics
 numpy>=1.26.0
 
-# Future filtering dependencies (install when implementing):
-# spacy                           # already required above (also needed for NER filters)
-# sentence-transformers>=3.0.0   # NLI-based merge (NLIMerge)
-# scikit-learn>=1.4.0             # MinHashLSH, BERTopic clustering
-# bertopic>=0.16.0                # topic-aware filtering
-# datasketch>=1.6.0               # MinHash signatures
-
-# Testing
-pytest>=8.0.0
+# HTTP (Ollama — only for generation, not embedding)
+httpx>=0.27.0

@@ -1,14 +1,16 @@
-# rag-bench v2
+# rag-bench v3
 
-Benchmarks RAG chunking strategies on SQuAD 1.1 with hybrid retrieval
-(dense nomic-embed-text + sparse BM25) and end-to-end LLM evaluation.
+Reproduces chunk filtering experiments from **Berdyugina et al. (arXiv:2604.24334)**  
+*"Reducing Redundancy in Retrieval-Augmented Generation through Chunk Filtering"*
 
-Follows evaluation protocol from Berdyugina et al. (arXiv:2604.24334):
-token-based Precision / Recall / IoU with raw and preprocessed tokenization,
-plus oracle upper bound. Adds SQuAD Exact Match and Token F1 for generation.
+## What changed from v2 baseline
 
-**No Docker, no root required** — Qdrant runs in embedded (in-process) mode.
-Suitable for vast.ai and other GPU cloud instances.
+| Component | v2 baseline | v3 (this repo) |
+|---|---|---|
+| Embedding | `nomic-embed-text` via Ollama (768-dim) | `all-MiniLM-L6-v2` via sentence-transformers (384-dim) |
+| Retrieval | Hybrid dense + BM25 sparse (RRF) | **Dense only** (cosine similarity) |
+| Filtering | Placeholder (not implemented) | **Fully implemented**: ExactNorm, MinHashLSH, Similarity, NERExact |
+| Vector store | Qdrant embedded | Qdrant embedded (unchanged) |
 
 ## Pipeline
 
@@ -19,22 +21,22 @@ load (SQuAD 1.1)
 chunk (FixedToken / RecursiveToken / ClusterSemantic)
     │
     ▼
-[filter]  ←── placeholder, not yet implemented (filtering=[] in all configs)
-    │          Future: ExactNorm, MinHashLSH, Similarity, NER_Exact, Merge...
-    ▼
-embed (nomic dense 768-dim + BM25 sparse)
+filter (NoFilter / ExactNorm / MinHashLSH(0.7) / Similarity(0.8) / NERExact)
     │
     ▼
-index → Qdrant embedded (no Docker)
+embed (all-MiniLM-L6-v2, 384-dim, sentence-transformers)
     │
     ▼
-retrieve (hybrid RRF, top-k=5)
+index → Qdrant embedded (no Docker, in-process)
     │
     ▼
-generate (Mistral 7B via Ollama)
+retrieve (dense cosine, top-k=5)
     │
     ▼
-evaluate (Precision / Recall / IoU / Oracle / EM / F1)
+[generate] (Mistral 7B via Ollama — optional, --skip-generation to bypass)
+    │
+    ▼
+evaluate (Precision / Recall / IoU / Oracle — paper Section 3.6)
 ```
 
 ## Stack
@@ -43,12 +45,11 @@ evaluate (Precision / Recall / IoU / Oracle / EM / F1)
 |---|---|
 | Dataset | SQuAD 1.1 (`rajpurkar/squad`, validation split) |
 | Chunking | FixedToken, RecursiveToken, ClusterSemantic |
-| Filtering | `src/filtering/` — placeholder, to be implemented |
-| Dense embedding | `nomic-embed-text-v1.5` via Ollama (768-dim) |
-| Sparse embedding | BM25 (computed locally, no model) |
+| Filtering | ExactNorm, MinHashLSH(0.7), Similarity(0.8), NERExact |
+| Embedding | `sentence-transformers/all-MiniLM-L6-v2` (384-dim) |
 | Vector store | Qdrant in-process (embedded, path-based, no Docker) |
-| Retrieval | Hybrid dense+sparse with RRF fusion, top-k=5 |
-| LLM | Mistral 7B via Ollama |
+| Retrieval | Dense cosine, top-k=5 |
+| LLM (optional) | Mistral 7B via Ollama |
 | Eval metrics | Precision / Recall / IoU / Oracle / EM / Token F1 |
 
 ## Quick start
@@ -58,38 +59,49 @@ evaluate (Precision / Recall / IoU / Oracle / EM / F1)
 pip install -r requirements.txt
 python -m spacy download en_core_web_sm
 
-# 2. Pull Ollama models
-ollama pull nomic-embed-text
+# 2. (Optional — only needed for generation metrics)
 ollama pull mistral
 
-# 3. Smoke test (fast, no LLM)
-python scripts/benchmark.py --max-docs 50 --max-questions 30 --skip-generation
+# 3. Debug run (fast — 20 docs, 30 questions, no LLM)
+python scripts/benchmark.py --max-docs 20 --max-questions 30 --skip-generation
 
-# 4. Full benchmark (all 10 configs)
+# 4. Single strategy debug
+python scripts/benchmark.py --strategy RecursiveToken --max-docs 50 --max-questions 50 --skip-generation
+
+# 5. Single filter debug
+python scripts/benchmark.py --filter NERExact --max-docs 50 --max-questions 50 --skip-generation
+
+# 6. Single config
+python scripts/benchmark.py --config "RecursiveToken_400_0__NERExact" --skip-generation
+
+# 7. Full benchmark — all 50 configs (10 chunkers × 5 filters), no LLM
+python scripts/benchmark.py --skip-generation
+
+# 8. Full benchmark with generation
 python scripts/benchmark.py
 
-# 5. Single config
-python scripts/benchmark.py --config RecursiveToken_400_0
-
-# 6. Background run on GPU instance
-nohup python scripts/benchmark.py > results/bench.log 2>&1 &
+# 9. Background run
+nohup python scripts/benchmark.py --skip-generation > results/bench.log 2>&1 &
 tail -f results/bench.log
 ```
 
-## Chunking configurations (current baseline, no filtering)
+## Configs generated
 
-| Config name | Strategy | chunk_size | overlap |
-|---|---|---|---|
-| FixedToken_200_0 | FixedToken | 200 | 0 |
-| FixedToken_400_0 | FixedToken | 400 | 0 |
-| FixedToken_400_200 | FixedToken | 400 | 200 |
-| FixedToken_800_400 | FixedToken | 800 | 400 |
-| RecursiveToken_200_0 | RecursiveToken | 200 | 0 |
-| RecursiveToken_400_0 | RecursiveToken | 400 | 0 |
-| RecursiveToken_400_200 | RecursiveToken | 400 | 200 |
-| RecursiveToken_800_400 | RecursiveToken | 800 | 400 |
-| ClusterSemantic_200_0 | ClusterSemantic | 200 | 0 |
-| ClusterSemantic_400_0 | ClusterSemantic | 400 | 0 |
+**10 chunking configs × 5 filter methods = 50 total configs**
+
+| Chunker | Configs |
+|---|---|
+| FixedToken | (200,0), (400,0), (400,200), (800,400) |
+| RecursiveToken | (200,0), (400,0), (400,200), (800,400) |
+| ClusterSemantic | (200,0), (400,0) |
+
+| Filter | Method | Paper ref |
+|---|---|---|
+| NoFilter | Pass-through baseline | Section 3.7 |
+| ExactNorm | Exact dedup after normalization | Section 3.5 |
+| MinHashLSH(0.7) | Near-dup via Jaccard / MinHash | Section 3.5 |
+| Similarity(0.8) | Cosine similarity threshold | Section 3.5 |
+| NERExact | Identical named-entity set | Section 3.5 |
 
 ## Output
 
@@ -97,63 +109,48 @@ tail -f results/bench.log
 
 | Column | Description |
 |---|---|
-| `chunk_count_before_filter` | chunks produced by chunker |
-| `chunk_count_after_filter` | chunks after filtering (= before when filtering=[]) |
-| `filter_reduction_pct` | % chunks removed by filtering |
-| `ingest_time_s` | chunking + filtering + embedding + upsert (seconds) |
-| `storage_mb` | Qdrant collection disk size (MB) |
-| `recall_raw` / `recall_pre` | token recall, raw and preprocessed |
-| `oracle_recall_raw` | greedy oracle upper bound on recall |
-| `exact_match` / `token_f1` | generation accuracy |
+| `config_name` | e.g. `RecursiveToken_400_0__NERExact` |
+| `filter_method` | Filter tag |
+| `chunk_count_before_filter` | Chunks produced by chunker |
+| `chunk_count_after_filter` | Chunks after filtering |
+| `filter_reduction_pct` | % chunks removed |
+| `ingest_time_s` | Chunking + filtering + embedding + upsert (seconds) |
+| `storage_mb` | Qdrant collection disk size (MB, numeric) |
+| `storage_du` | Qdrant collection disk size (du -sh output) |
+| `precision_raw` / `recall_raw` / `iou_raw` | Token metrics, raw mode |
+| `precision_pre` / `recall_pre` / `iou_pre` | Token metrics, preprocessed mode |
+| `oracle_recall_raw` | Greedy oracle upper bound |
+| `exact_match` / `token_f1` | Generation accuracy (if not --skip-generation) |
 
 `results/per_question_{config_name}.csv` — one row per question.
 
 ## Project layout
 
 ```
-rag-bench/
+rag-bench-v3/
 ├── configs/
-│   └── settings.py              # all parameters + chunking config list
+│   └── settings.py              # all parameters + config generation
 ├── src/
 │   ├── ingestion/
 │   │   ├── loader.py            # SQuAD 1.1 loader
 │   │   ├── chunker.py           # FixedToken, RecursiveToken, ClusterSemantic
-│   │   ├── embedder.py          # nomic dense + BM25 sparse
-│   │   └── vector_store.py      # Qdrant in-process CRUD + disk size
-│   ├── filtering/               # ← placeholder for future work
-│   │   ├── __init__.py          # design doc: planned methods + merge analysis
-│   │   └── pipeline.py          # FilteringPipeline (pass-through until implemented)
+│   │   ├── embedder.py          # all-MiniLM-L6-v2 via sentence-transformers
+│   │   └── vector_store.py      # Qdrant in-process, dense only
+│   ├── filtering/
+│   │   ├── filters.py           # NoFilter, ExactNorm, MinHashLSH, Similarity, NERExact
+│   │   └── pipeline.py          # FilteringPipeline — sequential composition
 │   ├── retrieval/
-│   │   └── retriever.py         # hybrid RRF (dense + sparse)
+│   │   └── retriever.py         # dense cosine retrieval
 │   ├── evaluation/
 │   │   ├── metrics.py           # Precision/Recall/IoU/Oracle/EM/F1
-│   │   └── generator.py         # Ollama LLM generation
+│   │   └── generator.py         # Ollama LLM generation (optional)
 │   └── utils/
 │       └── logger.py
 ├── scripts/
 │   └── benchmark.py             # main CLI
 ├── data/
-│   └── qdrant_storage/          # embedded Qdrant data (gitignored)
-├── results/                     # CSV outputs (gitignored)
+│   └── qdrant_storage/          # embedded Qdrant data
+├── results/                     # CSV outputs
 ├── requirements.txt
 └── README.md
 ```
-
-## Adding filtering (future)
-
-To add a new filter method:
-
-1. Create (or add to) the appropriate file in `src/filtering/`:
-   `lexical.py`, `semantic.py`, or `structural.py`
-
-2. Implement a class with an `apply(chunks, embed_fn) → list[dict]` method.
-
-3. Register it: `@register("MethodName")` decorator from `pipeline.py`.
-
-4. Add configs to `CHUNKING_CONFIGS` in `settings.py`:
-   ```python
-   {"strategy": "RecursiveToken", "chunk_size": 400, "overlap": 200,
-    "filtering": [{"method": "NER_Exact"}]}
-   ```
-
-No changes needed to `benchmark.py` or any other file.

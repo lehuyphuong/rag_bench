@@ -1,6 +1,8 @@
 """
-Answer generation via Ollama (Mistral 7B or any compatible model).
-Takes retrieved chunks as context, generates a short factual answer.
+Answer generation via Ollama (Mistral 7B).
+Used only for generation metrics (EM / Token F1).
+Embedding is handled entirely by sentence-transformers — Ollama not required
+for retrieval or filtering steps.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from configs.settings import (
 
 logger = logging.getLogger(__name__)
 
-_CHAT_URL = f"{OLLAMA_BASE_URL}/api/chat"
+_CHAT_URL    = f"{OLLAMA_BASE_URL}/api/chat"
 _HTTP_TIMEOUT = 120.0
 
 
@@ -33,16 +35,16 @@ def build_context(chunks: list[dict]) -> str:
 def generate_answer(question: str, chunks: list[dict]) -> str:
     """
     Generate an answer for `question` using `chunks` as context.
-    Returns the generated answer string.
+    Returns the generated answer string, or "" on failure.
     """
-    context = build_context(chunks)
+    context  = build_context(chunks)
     user_msg = f"Context:\n{context}\n\nQuestion: {question}\n\nAnswer:"
 
     payload = {
-        "model": LLM_MODEL,
+        "model":   LLM_MODEL,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_msg},
+            {"role": "user",   "content": user_msg},
         ],
         "options": {
             "temperature": LLM_TEMPERATURE,
@@ -55,8 +57,7 @@ def generate_answer(question: str, chunks: list[dict]) -> str:
         with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
             resp = client.post(_CHAT_URL, json=payload)
             resp.raise_for_status()
-        data = resp.json()
-        return data["message"]["content"].strip()
+        return resp.json()["message"]["content"].strip()
     except Exception as exc:
         logger.warning("Generation failed: %s", exc)
         return ""

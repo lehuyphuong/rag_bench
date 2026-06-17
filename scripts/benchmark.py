@@ -1,26 +1,36 @@
 """
-RAG Benchmark v2 — main entry point.
+RAG Benchmark v3 — main entry point.
 
-Pipeline per config:
+Reproduces Berdyugina et al. (arXiv:2604.24334) chunk filtering experiments.
+
+Pipeline per (chunker × filter) config:
   1. Chunk documents           (chunker.py)
-  2. Filter chunks             (filtering/pipeline.py — pass-through if filtering=[])
-  3. Embed (dense + BM25)      (embedder.py)
+  2. Filter chunks             (filtering/pipeline.py)
+  3. Embed dense vectors       (embedder.py — all-MiniLM-L6-v2)
   4. Ingest into Qdrant        (vector_store.py — in-process, no Docker)
-  5. Retrieve top-k per query  (retriever.py)
-  6. Generate answer via LLM   (generator.py)
-  7. Compute metrics           (metrics.py)
+  5. Retrieve top-k per query  (retriever.py — dense only, cosine)
+  6. Generate answer via LLM   (generator.py — Ollama Mistral, optional)
+  7. Compute metrics           (metrics.py — Precision/Recall/IoU/Oracle/EM/F1)
   8. Record results to CSV     (results/benchmark_results.csv)
 
-Config name format: "{strategy}_{size}_{overlap}[_{filter1}_{filter2}...]"
-  No filtering:   "RecursiveToken_400_200"
-  With filtering: "RecursiveToken_400_200_Similarity0.8_NER_Exact"  (future)
-
 Usage:
-    python scripts/benchmark.py
-    python scripts/benchmark.py --max-docs 100 --max-questions 50
-    python scripts/benchmark.py --config RecursiveToken_400_0
+    # Debug run (small)
+    python scripts/benchmark.py --max-docs 20 --max-questions 30 --skip-generation
+
+    # Single chunker strategy (all filters)
+    python scripts/benchmark.py --strategy RecursiveToken --max-docs 50 --max-questions 50 --skip-generation
+
+    # Single config
+    python scripts/benchmark.py --config "RecursiveToken_400_0__NERExact" --skip-generation
+
+    # Full benchmark (all configs, no LLM generation)
     python scripts/benchmark.py --skip-generation
-    python scripts/benchmark.py --keep-collections
+
+    # Full benchmark with generation
+    python scripts/benchmark.py
+
+    # Keep collections on disk (no auto-delete after each config)
+    python scripts/benchmark.py --keep-collections --skip-generation
 """
 
 from __future__ import annotations
@@ -51,11 +61,7 @@ from src.evaluation.metrics import (
 )
 from src.filtering.pipeline import FilteringPipeline
 from src.ingestion.chunker import chunk_documents
-from src.ingestion.embedder import (
-    build_bm25_vocab,
-    embed_chunks_batched,
-    embed_texts,
-)
+from src.ingestion.embedder import embed_chunks_batched, embed_texts
 from src.ingestion.loader import load_squad
 from src.ingestion.vector_store import (
     collection_name,
@@ -72,38 +78,37 @@ logger = logging.getLogger(__name__)
 
 # ── Config name ───────────────────────────────────────────────────────────────
 
-def make_config_name(strategy: str, chunk_size: int, overlap: int, filtering: list[dict]) -> str:
+def make_config_name(
+    strategy: str, chunk_size: int, overlap: int, filter_tag: str
+) -> str:
     """
     Human-readable config identifier used as collection name and CSV key.
 
-    No filtering:    "RecursiveToken_400_200"
-    With filtering:  "RecursiveToken_400_200__Similarity0.8__NER_Exact"
+    Format: "{strategy}_{size}_{overlap}__{filter_tag}"
+    Examples:
+      "RecursiveToken_400_0__NoFilter"
+      "RecursiveToken_400_0__NERExact"
+      "FixedToken_400_200__Similarity0.8"
     """
-    base = f"{strategy}_{chunk_size}_{overlap}"
-    if not filtering:
-        return base
-    filter_tags = "__".join(
-        step["method"] + (str(step.get("threshold", "")) if "threshold" in step else "")
-        for step in filtering
-    )
-    return f"{base}__{filter_tags}"
+    return f"{strategy}_{chunk_size}_{overlap}__{filter_tag}"
 
 
 # ── CSV field names ───────────────────────────────────────────────────────────
 
 SUMMARY_FIELDS = [
     # identification
-    "config_name", "strategy", "chunk_size", "overlap", "filtering",
+    "config_name", "strategy", "chunk_size", "overlap", "filter_method",
     # ingestion
     "chunk_count_before_filter", "chunk_count_after_filter",
-    "filter_reduction_pct", "ingest_time_s", "storage_mb",
-    # retrieval metrics (averaged, raw tokenization)
+    "filter_reduction_pct", "ingest_time_s",
+    "storage_mb", "storage_du",
+    # retrieval metrics (raw tokenization) — paper primary mode
     "precision_raw", "recall_raw", "iou_raw",
-    # retrieval metrics (averaged, preprocessed tokenization)
+    # retrieval metrics (preprocessed tokenization)
     "precision_pre", "recall_pre", "iou_pre",
     # oracle upper bound
     "oracle_recall_raw",
-    # generation metrics
+    # generation metrics (optional)
     "exact_match", "token_f1",
     # latency
     "avg_retrieval_ms", "avg_generation_s",
@@ -129,6 +134,7 @@ def run_ingest(
     overlap: int,
     filtering: list[dict],
     config_name: str,
+    filter_tag: str,
     embed_fn,
 ) -> tuple[list[dict], list[dict], float, str, dict]:
     """
@@ -144,29 +150,27 @@ def run_ingest(
     )
     logger.info("  %d chunks before filtering", len(chunks_raw))
 
-    # Step 2: Filter (pass-through if filtering=[])
+    # Step 2: Filter
     filter_pipeline = FilteringPipeline(steps=filtering)
     chunks = filter_pipeline.run(chunks_raw, embed_fn=embed_fn)
     logger.info("  %d chunks after filtering", len(chunks))
 
-    # Step 3: BM25 vocabulary (from post-filter chunks)
-    build_bm25_vocab([c["text"] for c in chunks])
+    # Step 3: Embed + ingest
+    cname = collection_name(strategy, chunk_size, overlap, filter_tag)
+    ensure_collection(cname, recreate=True)
 
-    # Step 4: Embed + ingest
-    cname = ensure_collection(strategy, chunk_size, overlap, recreate=True)
-    dense_vecs, sparse_vecs = [], []
-    for chunk, dv, sv in embed_chunks_batched(chunks, batch_size=EMBED_BATCH_SIZE):
+    dense_vecs: list[list[float]] = []
+    for chunk, dv in embed_chunks_batched(chunks, batch_size=EMBED_BATCH_SIZE):
         dense_vecs.append(dv)
-        sparse_vecs.append(sv)
 
-    upsert_chunks(cname, chunks, dense_vecs, sparse_vecs)
+    upsert_chunks(cname, chunks, dense_vecs)
 
     ingest_time = time.perf_counter() - t0
     stats = collection_stats(cname)
 
     logger.info(
-        "  Ingest done: %.1fs | %d points | %.2f MB",
-        ingest_time, stats["points_count"], stats["disk_mb"],
+        "  Ingest done: %.1fs | %d points | %.2f MB (%s)",
+        ingest_time, stats["points_count"], stats["disk_mb"], stats["disk_size_du"],
     )
     return chunks_raw, chunks, ingest_time, cname, stats
 
@@ -182,7 +186,7 @@ def run_eval(
     skip_generation: bool = False,
 ) -> tuple[dict, list[dict]]:
     """Evaluate retrieval + generation. Returns (summary_dict, per_q_rows)."""
-    doc_lookup = {d["doc_id"]: d for d in documents}
+    doc_lookup: dict[str, dict] = {d["doc_id"]: d for d in documents}
     chunks_by_doc: dict[str, list[dict]] = {}
     for c in all_chunks:
         chunks_by_doc.setdefault(c["doc_id"], []).append(c)
@@ -217,40 +221,40 @@ def run_eval(
         acc["recall_pre"].append(m_pre["recall"])
         acc["iou_pre"].append(m_pre["iou"])
 
-        # Oracle
+        # Oracle (on post-filter chunks from this doc only)
         doc_chunks = list(chunks_by_doc.get(qa["doc_id"], []))
         oracle = compute_oracle(reference_text, doc_chunks, k=ORACLE_K, mode="raw")
         acc["oracle_recall_raw"].append(oracle["oracle_recall"])
 
-        # Generation
+        # Generation (optional)
         gen_answer, em, f1, gen_time = "", 0.0, 0.0, 0.0
         if not skip_generation:
             t_gen = time.perf_counter()
             gen_answer = generate_answer(qa["question"], retrieved)
-            gen_time = time.perf_counter() - t_gen
-            em = exact_match(gen_answer, qa["answers"])
-            f1 = token_f1(gen_answer, qa["answers"])
+            gen_time   = time.perf_counter() - t_gen
+            em  = exact_match(gen_answer, qa["answers"])
+            f1  = token_f1(gen_answer, qa["answers"])
 
         acc["exact_match"].append(em)
         acc["token_f1"].append(f1)
         acc["generation_s"].append(gen_time)
 
         per_q_rows.append({
-            "config_name": config_name,
-            "question": qa["question"],
-            "doc_id": qa["doc_id"],
-            "answers": json.dumps(qa["answers"]),
-            "precision_raw": m_raw["precision"],
-            "recall_raw": m_raw["recall"],
-            "iou_raw": m_raw["iou"],
-            "precision_pre": m_pre["precision"],
-            "recall_pre": m_pre["recall"],
-            "iou_pre": m_pre["iou"],
+            "config_name":      config_name,
+            "question":         qa["question"],
+            "doc_id":           qa["doc_id"],
+            "answers":          json.dumps(qa["answers"]),
+            "precision_raw":    m_raw["precision"],
+            "recall_raw":       m_raw["recall"],
+            "iou_raw":          m_raw["iou"],
+            "precision_pre":    m_pre["precision"],
+            "recall_pre":       m_pre["recall"],
+            "iou_pre":          m_pre["iou"],
             "oracle_recall_raw": oracle["oracle_recall"],
             "generated_answer": gen_answer,
-            "exact_match": em,
-            "token_f1": f1,
-            "retrieval_ms": round(lat_ms, 2),
+            "exact_match":      em,
+            "token_f1":         f1,
+            "retrieval_ms":     round(lat_ms, 2),
         })
 
         if (i + 1) % 20 == 0:
@@ -271,7 +275,7 @@ def run_eval(
     ]}
     summary["avg_retrieval_ms"] = avg(acc["retrieval_ms"])
     summary["avg_generation_s"] = avg(acc["generation_s"])
-    summary["n_questions"] = len(per_q_rows)
+    summary["n_questions"]      = len(per_q_rows)
     return summary, per_q_rows
 
 
@@ -280,64 +284,109 @@ def run_eval(
 def main() -> None:
     configure_logging()
 
-    parser = argparse.ArgumentParser(description="RAG chunking benchmark on SQuAD 1.1")
-    parser.add_argument("--max-docs",       type=int, default=None)
-    parser.add_argument("--max-questions",  type=int, default=None)
-    parser.add_argument("--config",         type=str, default=None,
-                        help="Run only one config by name, e.g. 'RecursiveToken_400_0'")
-    parser.add_argument("--skip-generation", action="store_true")
-    parser.add_argument("--keep-collections", action="store_true")
+    parser = argparse.ArgumentParser(
+        description="RAG chunk filtering benchmark on SQuAD 1.1 (Berdyugina et al. reproduction)"
+    )
+    parser.add_argument(
+        "--max-docs", type=int, default=None,
+        help="Limit number of SQuAD documents (default: settings.MAX_DOCUMENTS)"
+    )
+    parser.add_argument(
+        "--max-questions", type=int, default=None,
+        help="Limit number of eval questions (default: settings.MAX_EVAL_QUESTIONS)"
+    )
+    parser.add_argument(
+        "--strategy", type=str, default=None,
+        choices=["FixedToken", "RecursiveToken", "ClusterSemantic"],
+        help="Run only configs for one chunking strategy"
+    )
+    parser.add_argument(
+        "--filter", type=str, default=None,
+        choices=["NoFilter", "ExactNorm", "MinHashLSH", "Similarity", "NERExact"],
+        help="Run only configs for one filter method"
+    )
+    parser.add_argument(
+        "--config", type=str, default=None,
+        help="Run a single config by exact name, e.g. 'RecursiveToken_400_0__NERExact'"
+    )
+    parser.add_argument(
+        "--skip-generation", action="store_true",
+        help="Skip LLM generation (retrieval metrics only — much faster)"
+    )
+    parser.add_argument(
+        "--keep-collections", action="store_true",
+        help="Do not delete Qdrant collections after each config"
+    )
     args = parser.parse_args()
 
     # Override caps from CLI
     import configs.settings as S
-    if args.max_docs:      S.MAX_DOCUMENTS = args.max_docs
-    if args.max_questions: S.MAX_EVAL_QUESTIONS = args.max_questions
+    if args.max_docs:      S.MAX_DOCUMENTS        = args.max_docs
+    if args.max_questions: S.MAX_EVAL_QUESTIONS   = args.max_questions
 
     documents, qa_pairs = load_squad()
     logger.info("Documents: %d | QA pairs: %d", len(documents), len(qa_pairs))
 
     embed_fn = lambda texts: embed_texts(texts)
 
-    # Setup summary CSV
-    summary_path = RESULTS_DIR / "benchmark_results.csv"
-    is_new = not summary_path.exists()
-    summary_f = open(summary_path, "a", newline="", encoding="utf-8")
-    summary_writer = csv.DictWriter(summary_f, fieldnames=SUMMARY_FIELDS)
-    if is_new:
-        summary_writer.writeheader()
+    # ── Build filter tag helper ───────────────────────────────────────────
+    def _filter_tag(filtering: list[dict]) -> str:
+        pipeline = FilteringPipeline(steps=filtering)
+        return pipeline.tag
 
-    # Filter configs if --config specified
-    configs = CHUNKING_CONFIGS
-    if args.config:
+    # ── Filter configs from CLI ───────────────────────────────────────────
+    configs = list(CHUNKING_CONFIGS)
+
+    if args.strategy:
+        configs = [c for c in configs if c["strategy"] == args.strategy]
+
+    if args.filter:
         configs = [
             c for c in configs
-            if make_config_name(c["strategy"], c["chunk_size"],
-                                c["overlap"], c["filtering"]) == args.config
+            if any(step["method"] == args.filter for step in c["filtering"])
         ]
+
+    if args.config:
+        def _name(c):
+            ft = _filter_tag(c["filtering"])
+            return make_config_name(c["strategy"], c["chunk_size"], c["overlap"], ft)
+        configs = [c for c in configs if _name(c) == args.config]
         if not configs:
             logger.error("Config '%s' not found.", args.config)
             sys.exit(1)
 
-    for cfg in configs:
-        strategy  = cfg["strategy"]
-        chunk_size = cfg["chunk_size"]
-        overlap   = cfg["overlap"]
-        filtering = cfg.get("filtering", [])
-        cname_str = make_config_name(strategy, chunk_size, overlap, filtering)
+    logger.info("Running %d configs.", len(configs))
 
-        logger.info("=" * 60)
+    # ── Setup summary CSV ─────────────────────────────────────────────────
+    summary_path = RESULTS_DIR / "benchmark_results.csv"
+    is_new       = not summary_path.exists()
+    summary_f    = open(summary_path, "a", newline="", encoding="utf-8")
+    summary_writer = csv.DictWriter(summary_f, fieldnames=SUMMARY_FIELDS)
+    if is_new:
+        summary_writer.writeheader()
+
+    # ── Run configs ───────────────────────────────────────────────────────
+    for cfg in configs:
+        strategy   = cfg["strategy"]
+        chunk_size = cfg["chunk_size"]
+        overlap    = cfg["overlap"]
+        filtering  = cfg.get("filtering", [])
+        ft         = _filter_tag(filtering)
+        cname_str  = make_config_name(strategy, chunk_size, overlap, ft)
+
+        logger.info("=" * 65)
         logger.info("Config: %s", cname_str)
-        logger.info("=" * 60)
+        logger.info("=" * 65)
 
         # Ingest
         chunks_raw, chunks, ingest_time, cname, stats = run_ingest(
-            documents, strategy, chunk_size, overlap, filtering, cname_str, embed_fn
+            documents, strategy, chunk_size, overlap,
+            filtering, cname_str, ft, embed_fn,
         )
 
-        n_before = len(chunks_raw)
-        n_after  = len(chunks)
-        reduction_pct = round(100 * (n_before - n_after) / n_before, 2) if n_before else 0.0
+        n_before       = len(chunks_raw)
+        n_after        = len(chunks)
+        reduction_pct  = round(100 * (n_before - n_after) / n_before, 2) if n_before else 0.0
 
         # Evaluate
         eval_summary, per_q = run_eval(
@@ -354,31 +403,33 @@ def main() -> None:
 
         # Summary row
         row = {
-            "config_name": cname_str,
-            "strategy": strategy,
-            "chunk_size": chunk_size,
-            "overlap": overlap,
-            "filtering": json.dumps(filtering),
+            "config_name":              cname_str,
+            "strategy":                 strategy,
+            "chunk_size":               chunk_size,
+            "overlap":                  overlap,
+            "filter_method":            ft,
             "chunk_count_before_filter": n_before,
-            "chunk_count_after_filter": n_after,
-            "filter_reduction_pct": reduction_pct,
-            "ingest_time_s": round(ingest_time, 2),
-            "storage_mb": stats["disk_mb"],
+            "chunk_count_after_filter":  n_after,
+            "filter_reduction_pct":     reduction_pct,
+            "ingest_time_s":            round(ingest_time, 2),
+            "storage_mb":               stats["disk_mb"],
+            "storage_du":               stats["disk_size_du"],
             **eval_summary,
         }
         summary_writer.writerow(row)
         summary_f.flush()
 
         logger.info(
-            "  DONE | chunks=%d→%d (-%.1f%%) | %.1fs | %.2fMB | "
-            "recall_raw=%.3f | recall_pre=%.3f | EM=%.3f | F1=%.3f",
-            n_before, n_after, reduction_pct, ingest_time, stats["disk_mb"],
+            "  DONE | chunks=%d→%d (-%.1f%%) | %.1fs | %.2f MB (%s) | "
+            "recall_raw=%.3f | recall_pre=%.3f | oracle=%.3f",
+            n_before, n_after, reduction_pct,
+            ingest_time, stats["disk_mb"], stats["disk_size_du"],
             eval_summary["recall_raw"], eval_summary["recall_pre"],
-            eval_summary["exact_match"], eval_summary["token_f1"],
+            eval_summary["oracle_recall_raw"],
         )
 
         if not args.keep_collections:
-            delete_collection(strategy, chunk_size, overlap)
+            delete_collection(cname)
 
     summary_f.close()
     logger.info("Results written to: %s", summary_path)

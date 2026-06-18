@@ -379,10 +379,17 @@ def topic_based_chunker(
     text      = doc["text"]
     sentences = _sentence_split(text)
 
-    if len(sentences) < 3 or embed_fn is None:
+    if embed_fn is None:
         logger.warning(
-            "TopicBased: insufficient sentences or no embed_fn — "
-            "falling back to AdaptiveSentenceLen."
+            "TopicBased: embed_fn not provided — falling back to AdaptiveSentenceLen."
+        )
+        return adaptive_sentence_len_chunker(doc)
+
+    if len(sentences) < 3:
+        logger.debug(
+            "TopicBased: doc '%s' has only %d sentence(s) — too short for "
+            "k-means clustering, falling back to AdaptiveSentenceLen.",
+            doc.get("doc_id", "?"), len(sentences),
         )
         return adaptive_sentence_len_chunker(doc)
 
@@ -471,11 +478,12 @@ def get_chunker(
             doc, chunk_size=chunk_size, overlap=overlap,
         )
     elif strategy == "TopicBased":
-        return lambda doc: topic_based_chunker(
+        # Explicitly capture embed_fn in default argument to avoid closure bug
+        return lambda doc, _fn=embed_fn: topic_based_chunker(
             doc,
             n_topics=extra.get("n_topics", 5),
             min_chunk_size=extra.get("min_chunk_size", chunk_size // 2),
-            embed_fn=embed_fn,
+            embed_fn=_fn,
         )
     else:
         raise ValueError(f"Unknown chunking strategy: {strategy!r}")

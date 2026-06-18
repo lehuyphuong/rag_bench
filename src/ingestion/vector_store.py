@@ -2,14 +2,16 @@
 Qdrant in-process (embedded) vector store — dense only.
 
 Uses QdrantClient(path=...) — no Docker, no port, no root.
-Each benchmark configuration gets its own collection with:
-  - dense named vector "dense" (384-dim all-MiniLM-L6-v2, cosine distance)
 
-No sparse/BM25 vectors — matches paper's dense-only retrieval protocol.
+API compatibility note:
+  Older Qdrant used named vectors via VectorsConfig(dense=VectorParams(...)).
+  Newer Qdrant (≥1.9) deprecated that Union syntax. We now use the simpler
+  unnamed vector API: vectors_config=VectorParams(...) directly, and pass
+  plain list[float] as the vector in PointStruct and query_points.
 
 Collection name format:
   "{COLLECTION_PREFIX}_{strategy}_{size}_{overlap}__{filter_tag}"
-  e.g. "squad_bench_v3_RecursiveToken_400_0__NERExact"
+  e.g. "squad_bench_v4_AdaptiveEntropy_300_0__NERExact"
 """
 
 from __future__ import annotations
@@ -23,7 +25,6 @@ from qdrant_client.models import (
     HnswConfigDiff,
     PointStruct,
     VectorParams,
-    VectorsConfig,
 )
 
 from configs.settings import (
@@ -33,8 +34,6 @@ from configs.settings import (
 )
 
 logger = logging.getLogger(__name__)
-
-DENSE_VECTOR_NAME = "dense"
 
 _client: QdrantClient | None = None
 
@@ -55,9 +54,7 @@ def collection_name(strategy: str, chunk_size: int, overlap: int, filter_tag: st
     return base
 
 
-def ensure_collection(
-    cname: str, recreate: bool = True
-) -> str:
+def ensure_collection(cname: str, recreate: bool = True) -> str:
     """Create (or recreate) a Qdrant collection."""
     client = get_client()
     existing = [c.name for c in client.get_collections().collections]
@@ -70,13 +67,12 @@ def ensure_collection(
             logger.info("Collection '%s' already exists — skipping.", cname)
             return cname
 
+    # Use unnamed vector API (compatible with all Qdrant ≥1.7)
     client.create_collection(
         collection_name=cname,
-        vectors_config=VectorsConfig(
-            dense=VectorParams(
-                size=TEXT_EMBED_DIM,
-                distance=Distance.COSINE,
-            )
+        vectors_config=VectorParams(
+            size=TEXT_EMBED_DIM,
+            distance=Distance.COSINE,
         ),
         hnsw_config=HnswConfigDiff(m=16, ef_construct=100),
     )
@@ -101,7 +97,7 @@ def upsert_chunks(
         points = [
             PointStruct(
                 id=abs(hash(chunk["chunk_id"])) % (2 ** 53),
-                vector={DENSE_VECTOR_NAME: dvec},
+                vector=dvec,   # unnamed vector — plain list[float]
                 payload={
                     "chunk_id":   chunk["chunk_id"],
                     "doc_id":     chunk["doc_id"],

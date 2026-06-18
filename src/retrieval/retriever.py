@@ -18,7 +18,7 @@ from qdrant_client.models import SearchRequest
 
 from configs.settings import TOP_K
 from src.ingestion.embedder import embed_texts
-from src.ingestion.vector_store import DENSE_VECTOR_NAME, get_client
+from src.ingestion.vector_store import get_client
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,6 @@ def retrieve(
     results = client.query_points(
         collection_name=cname,
         query=dense_vec,
-        using=DENSE_VECTOR_NAME,
         limit=top_k,
         with_payload=True,
     ).points

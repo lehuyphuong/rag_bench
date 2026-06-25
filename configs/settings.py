@@ -34,7 +34,7 @@ TEXT_EMBED_DIM   = 384
 EMBED_BATCH_SIZE = 128
 
 # ── Qdrant (embedded, no Docker) ─────────────────────────────────────────────
-COLLECTION_PREFIX = "squad_bench_v4"
+COLLECTION_PREFIX = "squad_bench_v5"
 
 # ── Retrieval ─────────────────────────────────────────────────────────────────
 TOP_K = 5
@@ -53,7 +53,10 @@ If the answer is not in the context, respond with exactly: "I don't know."\
 
 # ── Chunking + Filtering configurations ──────────────────────────────────────
 #
-# 5 new chunking strategies × 5 filter methods = 50 configs
+# 9 chunking strategies × 5 filter methods = 90 configs
+#   (4 classic v3: FixedToken, RecursiveToken, ClusterSemantic, Overlapping)
+#   (5 new v4:     AdaptiveEntropy, AdaptiveSentenceLen, HierarchicalParentChild,
+#                  Contextual, TopicBased)
 #
 # Strategy params:
 #   chunk_size : target chunk size in characters (base unit)
@@ -66,6 +69,27 @@ If the answer is not in the context, respond with exactly: "I don't know."\
 
 def _make_configs() -> list[dict]:
     chunker_configs = [
+        # ── FixedToken (paper Section 3.3, baseline) ─────────────────────────
+        # Paper tests: (200,0), (400,0), (400,200), (800,400)
+        # Dùng 2 size phổ biến nhất để so sánh
+        {"strategy": "FixedToken",      "chunk_size": 200, "overlap": 0},
+        {"strategy": "FixedToken",      "chunk_size": 400, "overlap": 0},
+
+        # ── RecursiveToken (paper Section 3.3) ───────────────────────────────
+        {"strategy": "RecursiveToken",  "chunk_size": 200, "overlap": 0},
+        {"strategy": "RecursiveToken",  "chunk_size": 400, "overlap": 0},
+
+        # ── ClusterSemantic (paper Section 3.3) ──────────────────────────────
+        {"strategy": "ClusterSemantic", "chunk_size": 200, "overlap": 0,
+         "extra": {"threshold_percentile": 95.0}},
+        {"strategy": "ClusterSemantic", "chunk_size": 400, "overlap": 0,
+         "extra": {"threshold_percentile": 95.0}},
+
+        # ── Overlapping (paper Section 3.3) — nguồn chính gây redundancy ─────
+        # Paper tests: FixedToken(400,200) và FixedToken(800,400)
+        {"strategy": "Overlapping",     "chunk_size": 400, "overlap": 200},
+        {"strategy": "Overlapping",     "chunk_size": 800, "overlap": 400},
+
         # ── AdaptiveEntropy ─────────────────────────────────────────────────
         # base_size drives the lerp range; min/max derived as base//3 and base*2
         {"strategy": "AdaptiveEntropy",       "chunk_size": 300, "overlap": 0},

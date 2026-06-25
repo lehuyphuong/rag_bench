@@ -453,7 +453,25 @@ def get_chunker(
     """Return a callable(doc) → list[chunk] for the given strategy."""
     extra = extra or {}
 
-    if strategy == "AdaptiveEntropy":
+    if strategy == "FixedToken":
+        return lambda doc: fixed_token_chunker(
+            doc, chunk_size=chunk_size, overlap=overlap,
+        )
+    elif strategy == "RecursiveToken":
+        return lambda doc: recursive_token_chunker(
+            doc, chunk_size=chunk_size, overlap=overlap,
+        )
+    elif strategy == "ClusterSemantic":
+        return lambda doc, _fn=embed_fn: cluster_semantic_chunker(
+            doc, chunk_size=chunk_size, overlap=overlap,
+            embed_fn=_fn,
+            threshold_percentile=extra.get("threshold_percentile", 95.0),
+        )
+    elif strategy == "Overlapping":
+        return lambda doc: overlapping_chunker(
+            doc, chunk_size=chunk_size, overlap=overlap,
+        )
+    elif strategy == "AdaptiveEntropy":
         return lambda doc: adaptive_entropy_chunker(
             doc,
             base_size=chunk_size,
@@ -515,3 +533,203 @@ def chunk_documents(
         strategy, chunk_size, overlap, elapsed,
     )
     return all_chunks, elapsed
+
+# ── Classic chunkers (paper v3 / Berdyugina et al. Section 3.3) ──────────────
+#
+# Thêm lại 4 chunkers từ paper gốc để reproduce toàn bộ experiment:
+#   FixedToken, RecursiveToken, ClusterSemantic, Overlapping
+# Các chunkers này được đề cập trong Section 3.3 của paper như baseline.
+
+def _find_offset(text: str, needle: str, start: int = 0) -> int:
+    idx = text.find(needle, start)
+    return idx if idx >= 0 else start
+
+
+def fixed_token_chunker(
+    doc: dict,
+    chunk_size: int = 400,
+    overlap: int = 0,
+) -> list[dict]:
+    """
+    FixedTokenChunker (paper Section 3.3) — cắt text theo số ký tự cố định.
+    Baseline đơn giản nhất. Paper test chunk_size=200,400,800 và overlap=0,200.
+    """
+    text   = doc["text"]
+    chunks = []
+    idx    = 0
+    start  = 0
+    step   = max(1, chunk_size - overlap)
+
+    while start < len(text):
+        end  = min(start + chunk_size, len(text))
+        span = text[start:end].strip()
+        if span:
+            chunks.append(_make_chunk(
+                doc, f"{doc['doc_id']}_{idx}", span, start, end,
+            ))
+            idx += 1
+        start += step
+
+    return [c for c in chunks if c["text"]]
+
+
+def recursive_token_chunker(
+    doc: dict,
+    chunk_size: int = 400,
+    overlap: int = 0,
+) -> list[dict]:
+    """
+    RecursiveTokenChunker (paper Section 3.3) — cắt theo cấu trúc tài liệu:
+    paragraph (\\n\\n) → sentence (.!?) → space → ký tự.
+    Tương đương LangChain RecursiveCharacterTextSplitter.
+    Paper test chunk_size=200,400 và overlap=0.
+    """
+    separators = ["\n\n", "\n", ". ", "! ", "? ", " "]
+
+    def _split_recursive(text: str, seps: list[str]) -> list[str]:
+        if not text.strip():
+            return []
+        if not seps:
+            return [text[i:i + chunk_size]
+                    for i in range(0, len(text), max(1, chunk_size - overlap))]
+        sep    = seps[0]
+        parts  = text.split(sep)
+        result: list[str] = []
+        buf    = ""
+        for part in parts:
+            candidate = (buf + sep + part).strip() if buf else part.strip()
+            if len(candidate) <= chunk_size:
+                buf = candidate
+            else:
+                if buf:
+                    result.append(buf)
+                if len(part.strip()) > chunk_size:
+                    result.extend(_split_recursive(part, seps[1:]))
+                    buf = ""
+                else:
+                    buf = part.strip()
+        if buf:
+            result.append(buf)
+        return result
+
+    text    = doc["text"]
+    pieces  = _split_recursive(text, separators)
+    chunks  = []
+    carried = ""
+    for i, piece in enumerate(pieces):
+        merged = (carried + " " + piece).strip() if carried else piece
+        span   = merged[:chunk_size].strip()
+        if span:
+            start = _find_offset(text, span[:30])
+            chunks.append(_make_chunk(
+                doc, f"{doc['doc_id']}_{i}", span, start, start + len(span),
+            ))
+        carried = span[-overlap:].strip() if overlap > 0 and span else ""
+
+    return [c for c in chunks if c["text"]]
+
+
+def cluster_semantic_chunker(
+    doc: dict,
+    chunk_size: int = 400,
+    overlap: int = 0,
+    embed_fn=None,
+    threshold_percentile: float = 95.0,
+) -> list[dict]:
+    """
+    ClusterSemanticChunker (paper Section 3.3) — cắt tại điểm cosine distance
+    giữa 2 câu liên tiếp vượt ngưỡng percentile (sequential breakpoint).
+    Tương đương LangChain SemanticChunker.
+    Fallback về RecursiveTokenChunker nếu không có embed_fn.
+    """
+    if embed_fn is None:
+        logger.debug("ClusterSemantic: no embed_fn → fallback RecursiveToken")
+        return recursive_token_chunker(doc, chunk_size=chunk_size, overlap=overlap)
+
+    sentences = _sentence_split(doc["text"])
+    if len(sentences) < 3:
+        return recursive_token_chunker(doc, chunk_size=chunk_size, overlap=overlap)
+
+    vecs  = np.array(embed_fn(sentences), dtype=np.float32)
+    norms = np.linalg.norm(vecs, axis=1, keepdims=True).clip(min=1e-9)
+    vecs  = vecs / norms
+
+    distances = [
+        float(1.0 - float(np.dot(vecs[i], vecs[i + 1])))
+        for i in range(len(vecs) - 1)
+    ]
+    threshold = float(np.percentile(distances, threshold_percentile))
+
+    text    = doc["text"]
+    chunks  = []
+    buf     = [sentences[0]]
+    chunk_i = 0
+    cursor  = 0
+
+    for i, dist in enumerate(distances):
+        if dist >= threshold:
+            chunk_text = " ".join(buf).strip()
+            if chunk_text:
+                start = _find_offset(text, buf[0][:20], cursor)
+                end   = start + len(chunk_text)
+                chunks.append(_make_chunk(
+                    doc, f"{doc['doc_id']}_{chunk_i}", chunk_text, start, end,
+                ))
+                cursor   = end
+                chunk_i += 1
+            buf = [sentences[i + 1]]
+        else:
+            buf.append(sentences[i + 1])
+
+    if buf:
+        chunk_text = " ".join(buf).strip()
+        if chunk_text:
+            start = _find_offset(text, buf[0][:20], cursor)
+            end   = start + len(chunk_text)
+            chunks.append(_make_chunk(
+                doc, f"{doc['doc_id']}_{chunk_i}", chunk_text, start, end,
+            ))
+
+    return ([c for c in chunks if c["text"]]
+            or recursive_token_chunker(doc, chunk_size=chunk_size, overlap=overlap))
+
+
+def overlapping_chunker(
+    doc: dict,
+    chunk_size: int = 400,
+    overlap: int = 200,
+) -> list[dict]:
+    """
+    Overlapping / SlidingWindow chunker (paper Section 3.3) — FixedToken với
+    overlap bắt buộc, cắt tại ranh giới từ.
+    Paper test (400,200) và (800,400) — nguồn chính gây redundancy.
+    """
+    if overlap >= chunk_size:
+        overlap = chunk_size // 4
+
+    text  = doc["text"]
+    words = text.split()
+    if not words:
+        return []
+
+    avg_char  = len(text) / len(words)
+    w_chunk   = max(1, int(chunk_size / avg_char))
+    w_overlap = max(0, int(overlap / avg_char))
+    step      = max(1, w_chunk - w_overlap)
+
+    chunks = []
+    idx    = 0
+    i      = 0
+    while i < len(words):
+        span_words = words[i:i + w_chunk]
+        span_text  = " ".join(span_words).strip()
+        if span_text:
+            start = _find_offset(text, span_text[:30])
+            end   = start + len(span_text)
+            chunks.append(_make_chunk(
+                doc, f"{doc['doc_id']}_{idx}", span_text, start, end,
+            ))
+            idx += 1
+        i += step
+
+    return [c for c in chunks if c["text"]]

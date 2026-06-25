@@ -1,25 +1,38 @@
 """
 RAG Benchmark v4 — main entry point.
 
-Chunk strategies : AdaptiveEntropy, AdaptiveSentenceLen,
+Chunk strategies : FixedToken, RecursiveToken, ClusterSemantic, Overlapping
+                   (paper v3 / Berdyugina et al. Section 3.3)
+                   AdaptiveEntropy, AdaptiveSentenceLen,
                    HierarchicalParentChild, Contextual, TopicBased
+                   (paper v4 new strategies)
 Filter methods   : NoFilter, ExactNorm, MinHashLSH(0.7), Similarity(0.8), NERExact
+                   (giữ nguyên 5 methods của paper — không thêm CACD)
 Eval metrics     : Precision, Recall, IoU, Index Size (chunk count + storage MB)
+                   (giữ nguyên 4 metrics của paper)
+
+Tổng: 9 strategies x 2 sizes x 5 filters = 90 configs
 
 Usage:
     # Debug (small)
     python scripts/benchmark.py --max-docs 20 --max-questions 30
 
     # Single strategy
-    python scripts/benchmark.py --strategy TopicBased --max-docs 50 --max-questions 50
+    python scripts/benchmark.py --strategy FixedToken --max-docs 50 --max-questions 50
 
     # Single filter
     python scripts/benchmark.py --filter NERExact --max-docs 50 --max-questions 50
 
-    # Single config
-    python scripts/benchmark.py --config "Contextual_300_0__NERExact"
+    # Chỉ 5 strategies mới (v4)
+    python scripts/benchmark.py --v4-only
 
-    # Full benchmark (all 50 configs)
+    # Chỉ 4 strategies cũ (v3)
+    python scripts/benchmark.py --classic-only
+
+    # Single config
+    python scripts/benchmark.py --config "FixedToken_400_0__Similarity0.8"
+
+    # Full benchmark (all 90 configs)
     python scripts/benchmark.py
 
     # Background
@@ -246,6 +259,9 @@ def main() -> None:
     parser.add_argument(
         "--strategy", type=str, default=None,
         choices=[
+            # Classic (paper v3)
+            "FixedToken", "RecursiveToken", "ClusterSemantic", "Overlapping",
+            # New (paper v4)
             "AdaptiveEntropy", "AdaptiveSentenceLen",
             "HierarchicalParentChild", "Contextual", "TopicBased",
         ],
@@ -262,6 +278,14 @@ def main() -> None:
         "--keep-collections", action="store_true",
         help="Do not delete Qdrant collections after each config",
     )
+    parser.add_argument(
+        "--v4-only", action="store_true",
+        help="Run only 5 new v4 strategies (50 configs)",
+    )
+    parser.add_argument(
+        "--classic-only", action="store_true",
+        help="Run only 4 classic v3 strategies (40 configs)",
+    )
     args = parser.parse_args()
 
     import configs.settings as S
@@ -277,7 +301,17 @@ def main() -> None:
         return FilteringPipeline(steps=filtering).tag
 
     # ── Filter configs from CLI ───────────────────────────────────────────
+    V4_STRATEGIES      = {"AdaptiveEntropy","AdaptiveSentenceLen",
+                            "HierarchicalParentChild","Contextual","TopicBased"}
+    CLASSIC_STRATEGIES = {"FixedToken","RecursiveToken",
+                          "ClusterSemantic","Overlapping"}
+
     configs = list(CHUNKING_CONFIGS)
+
+    if getattr(args, "v4_only", False):
+        configs = [c for c in configs if c["strategy"] in V4_STRATEGIES]
+    if getattr(args, "classic_only", False):
+        configs = [c for c in configs if c["strategy"] in CLASSIC_STRATEGIES]
 
     if args.strategy:
         configs = [c for c in configs if c["strategy"] == args.strategy]

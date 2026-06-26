@@ -123,8 +123,8 @@ def _make_configs() -> list[dict]:
     filter_configs = [
         [{"method": "NoFilter"}],
         [{"method": "ExactNorm"}],
-        [{"method": "MinHashLSH",  "threshold": 0.85}], # 0.7
-        [{"method": "Similarity",  "threshold": 0.85}], # 0.8
+        [{"method": "MinHashLSH",  "threshold": 0.8}],
+        [{"method": "Similarity",  "threshold": 0.8}],
         [{"method": "NERExact"}],
     ]
 

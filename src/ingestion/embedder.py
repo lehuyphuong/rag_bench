@@ -7,6 +7,8 @@ Paper Section 3.4:
 
 Dense-only (no BM25 sparse), matching paper's retrieval protocol.
 
+GPU support: tự động dùng CUDA nếu có, fallback về CPU.
+
 Public API:
     get_model()                     → SentenceTransformer singleton
     embed_texts(texts)              → list[list[float]]  (384-dim each)
@@ -19,11 +21,14 @@ import logging
 from typing import Generator
 
 import numpy as np
+import torch
 from sentence_transformers import SentenceTransformer
 
 from configs.settings import EMBED_BATCH_SIZE, EMBED_MODEL, TEXT_EMBED_DIM
 
 logger = logging.getLogger(__name__)
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 _model: SentenceTransformer | None = None
 
@@ -32,10 +37,11 @@ def get_model() -> SentenceTransformer:
     """Lazy-load and cache the embedding model."""
     global _model
     if _model is None:
-        logger.info("Loading embedding model: %s", EMBED_MODEL)
-        _model = SentenceTransformer(EMBED_MODEL)
+        logger.info("Loading embedding model: %s on %s", EMBED_MODEL, DEVICE)
+        _model = SentenceTransformer(EMBED_MODEL, device=DEVICE)
         logger.info(
-            "Model loaded — output dim: %d", _model.get_sentence_embedding_dimension()
+            "Model loaded — output dim: %d | device: %s",
+            _model.get_sentence_embedding_dimension(), DEVICE,
         )
     return _model
 
@@ -48,12 +54,11 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
     model = get_model()
-    # show_progress_bar=False to keep logs clean during benchmarking
     vecs = model.encode(
         texts,
         batch_size=EMBED_BATCH_SIZE,
         show_progress_bar=False,
-        normalize_embeddings=True,   # unit-norm → cosine sim = dot product
+        normalize_embeddings=True,
         convert_to_numpy=True,
     )
     return vecs.tolist()

@@ -7,7 +7,7 @@ Paper Section 3.4:
 
 Dense-only (no BM25 sparse), matching paper's retrieval protocol.
 
-GPU support: tự động dùng CUDA nếu có, fallback về CPU.
+GPU support: automatically uses CUDA if available, falls back to CPU.
 
 Public API:
     get_model()                     → SentenceTransformer singleton

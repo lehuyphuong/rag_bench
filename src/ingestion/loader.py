@@ -32,11 +32,12 @@ def load_squad() -> tuple[list[dict], list[dict]]:
     documents : unique context passages, deduplicated by content hash.
     qa_pairs  : question + ground-truth answers + doc_id reference.
 
-    Đọc MAX_DOCUMENTS / MAX_EVAL_QUESTIONS qua `settings.XXX` (không
-    phải `from configs.settings import XXX`), để benchmark.py có thể
-    override các giá trị này từ CLI (--max-docs/--max-questions) SAU
-    khi module này đã được import — Python "from X import Y" copy giá
-    trị tại thời điểm import, không tham chiếu động.
+    MAX_DOCUMENTS / MAX_EVAL_QUESTIONS are read via `settings.XXX` (module
+    reference) rather than `from configs.settings import XXX` (value copy),
+    so that benchmark.py can override these values from the CLI
+    (--max-docs/--max-questions) AFTER this module has been imported.
+    Python's "from X import Y" copies the value at import time and does
+    not track later reassignment of the module attribute.
     """
     logger.info("Loading %s / %s ...", settings.DATASET_NAME, settings.DATASET_SPLIT)
     ds = load_dataset(settings.DATASET_NAME, split=settings.DATASET_SPLIT)

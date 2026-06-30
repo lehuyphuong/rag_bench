@@ -25,11 +25,8 @@ QDRANT_PATH.mkdir(exist_ok=True)
 # ── Dataset ──────────────────────────────────────────────────────────────────
 DATASET_NAME       = "rajpurkar/squad"
 DATASET_SPLIT      = "validation"
-# MAX_DOCUMENTS:       int | None = 500
-# MAX_EVAL_QUESTIONS:  int | None = 200
-
-MAX_DOCUMENTS:       int | None = None
-MAX_EVAL_QUESTIONS:  int | None = None
+MAX_DOCUMENTS:       int | None = 500
+MAX_EVAL_QUESTIONS:  int | None = 200
 
 # ── Embedding — all-MiniLM-L6-v2 ─────────────────────────────────────────────
 EMBED_MODEL      = "sentence-transformers/all-MiniLM-L6-v2"
@@ -74,7 +71,7 @@ def _make_configs() -> list[dict]:
     chunker_configs = [
         # ── FixedToken (paper Section 3.3, baseline) ─────────────────────────
         # Paper tests: (200,0), (400,0), (400,200), (800,400)
-        # Dùng 2 size phổ biến nhất để so sánh
+        # Use the 2 most common sizes for comparison
         {"strategy": "FixedToken",      "chunk_size": 200, "overlap": 0},
         {"strategy": "FixedToken",      "chunk_size": 400, "overlap": 0},
 
@@ -88,8 +85,8 @@ def _make_configs() -> list[dict]:
         {"strategy": "ClusterSemantic", "chunk_size": 400, "overlap": 0,
          "extra": {"threshold_percentile": 95.0}},
 
-        # ── Overlapping (paper Section 3.3) — nguồn chính gây redundancy ─────
-        # Paper tests: FixedToken(400,200) và FixedToken(800,400)
+        # ── Overlapping (paper Section 3.3) — main source of redundancy ──────
+        # Paper tests: FixedToken(400,200) and FixedToken(800,400)
         {"strategy": "Overlapping",     "chunk_size": 400, "overlap": 200},
         {"strategy": "Overlapping",     "chunk_size": 800, "overlap": 400},
 
@@ -126,7 +123,7 @@ def _make_configs() -> list[dict]:
     filter_configs = [
         [{"method": "NoFilter"}],
         [{"method": "ExactNorm"}],
-        [{"method": "MinHashLSH",  "threshold": 0.8}],
+        [{"method": "MinHashLSH",  "threshold": 0.7}],
         [{"method": "Similarity",  "threshold": 0.8}],
         [{"method": "NERExact"}],
     ]

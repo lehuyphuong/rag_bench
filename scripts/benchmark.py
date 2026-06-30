@@ -7,11 +7,11 @@ Chunk strategies : FixedToken, RecursiveToken, ClusterSemantic, Overlapping
                    HierarchicalParentChild, Contextual, TopicBased
                    (paper v4 new strategies)
 Filter methods   : NoFilter, ExactNorm, MinHashLSH(0.7), Similarity(0.8), NERExact
-                   (giữ nguyên 5 methods của paper — không thêm CACD)
+                   (unchanged — same 5 methods as the paper, no CACD)
 Eval metrics     : Precision, Recall, IoU, Index Size (chunk count + storage MB)
-                   (giữ nguyên 4 metrics của paper)
+                   (unchanged — same 4 metrics as the paper)
 
-Tổng: 9 strategies x 2 sizes x 5 filters = 90 configs
+Total: 9 strategies x 2 sizes x 5 filters = 90 configs
 
 Usage:
     # Debug (small)
@@ -23,10 +23,10 @@ Usage:
     # Single filter
     python scripts/benchmark.py --filter NERExact --max-docs 50 --max-questions 50
 
-    # Chỉ 5 strategies mới (v4)
+    # Only the 5 new v4 strategies
     python scripts/benchmark.py --v4-only
 
-    # Chỉ 4 strategies cũ (v3)
+    # Only the 4 classic v3 strategies
     python scripts/benchmark.py --classic-only
 
     # Single config

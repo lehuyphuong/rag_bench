@@ -4,12 +4,12 @@ Chunking strategies — rag-bench v4.
 Five new strategies replacing the v3 Fixed/Recursive/ClusterSemantic set:
 
   AdaptiveEntropy      : chunk size adapts to local text entropy (Shannon H).
-                         High-entropy (information-dense) text → smaller chunks.
-                         Low-entropy (repetitive) text → larger chunks.
+                         High-entropy (information-dense) text => smaller chunks.
+                         Low-entropy (repetitive) text => larger chunks.
 
   AdaptiveSentenceLen  : chunk size adapts to mean sentence length in each
-                         sliding window. Short-sentence passages → finer chunks.
-                         Long-sentence passages → coarser chunks.
+                         sliding window. Short-sentence passages => finer chunks.
+                         Long-sentence passages => coarser chunks.
 
   HierarchicalParentChild : two-level chunking. Large "parent" chunks are split
                          into smaller "child" chunks. Both levels are indexed;
@@ -111,8 +111,8 @@ def adaptive_entropy_chunker(
       2. Compute entropy H of the window.
       3. Normalise H to [0,1] relative to the text's global entropy range.
       4. Target chunk size = lerp(max_size, min_size, normalised_H):
-           high entropy (dense info) → smaller chunks (closer to min_size)
-           low  entropy (repetitive) → larger  chunks (closer to max_size)
+           high entropy (dense info) => smaller chunks (closer to min_size)
+           low  entropy (repetitive) => larger  chunks (closer to max_size)
       5. Emit a chunk at the nearest sentence boundary to the target end.
     """
     text      = doc["text"]
@@ -450,7 +450,7 @@ def get_chunker(
     embed_fn:   Callable | None = None,
     extra:      dict | None = None,
 ):
-    """Return a callable(doc) → list[chunk] for the given strategy."""
+    """Return a callable(doc) => list[chunk] for the given strategy."""
     extra = extra or {}
 
     if strategy == "FixedToken":
@@ -528,7 +528,7 @@ def chunk_documents(
     elapsed = time.perf_counter() - t0
 
     logger.info(
-        "Chunked %d docs → %d chunks [%s size=%d overlap=%d] in %.2fs",
+        "Chunked %d docs => %d chunks [%s size=%d overlap=%d] in %.2fs",
         len(documents), len(all_chunks),
         strategy, chunk_size, overlap, elapsed,
     )
@@ -536,9 +536,9 @@ def chunk_documents(
 
 # ── Classic chunkers (paper v3 / Berdyugina et al. Section 3.3) ──────────────
 #
-# Thêm lại 4 chunkers từ paper gốc để reproduce toàn bộ experiment:
-#   FixedToken, RecursiveToken, ClusterSemantic, Overlapping
-# Các chunkers này được đề cập trong Section 3.3 của paper như baseline.
+# Re-added 4 classic chunkers from the original paper to reproduce the full
+# experiment: FixedToken, RecursiveToken, ClusterSemantic, Overlapping.
+# These chunkers are referenced in Section 3.3 of the paper as baselines.
 
 def _find_offset(text: str, needle: str, start: int = 0) -> int:
     idx = text.find(needle, start)
@@ -551,8 +551,9 @@ def fixed_token_chunker(
     overlap: int = 0,
 ) -> list[dict]:
     """
-    FixedTokenChunker (paper Section 3.3) — cắt text theo số ký tự cố định.
-    Baseline đơn giản nhất. Paper test chunk_size=200,400,800 và overlap=0,200.
+    FixedTokenChunker (paper Section 3.3) — splits text into fixed-length
+    character windows. Simplest possible baseline. Paper tests
+    chunk_size=200,400,800 and overlap=0,200.
     """
     text   = doc["text"]
     chunks = []
@@ -579,10 +580,10 @@ def recursive_token_chunker(
     overlap: int = 0,
 ) -> list[dict]:
     """
-    RecursiveTokenChunker (paper Section 3.3) — cắt theo cấu trúc tài liệu:
-    paragraph (\\n\\n) → sentence (.!?) → space → ký tự.
-    Tương đương LangChain RecursiveCharacterTextSplitter.
-    Paper test chunk_size=200,400 và overlap=0.
+    RecursiveTokenChunker (paper Section 3.3) — splits according to document
+    structure: paragraph (\\n\\n) => sentence (.!?) => space => character.
+    Equivalent to LangChain's RecursiveCharacterTextSplitter.
+    Paper tests chunk_size=200,400 and overlap=0.
     """
     separators = ["\n\n", "\n", ". ", "! ", "? ", " "]
 
@@ -637,13 +638,14 @@ def cluster_semantic_chunker(
     threshold_percentile: float = 95.0,
 ) -> list[dict]:
     """
-    ClusterSemanticChunker (paper Section 3.3) — cắt tại điểm cosine distance
-    giữa 2 câu liên tiếp vượt ngưỡng percentile (sequential breakpoint).
-    Tương đương LangChain SemanticChunker.
-    Fallback về RecursiveTokenChunker nếu không có embed_fn.
+    ClusterSemanticChunker (paper Section 3.3) — places a breakpoint wherever
+    the cosine distance between two consecutive sentences exceeds a given
+    percentile threshold (sequential breakpoint detection).
+    Equivalent to LangChain's SemanticChunker.
+    Falls back to RecursiveTokenChunker if embed_fn is not provided.
     """
     if embed_fn is None:
-        logger.debug("ClusterSemantic: no embed_fn → fallback RecursiveToken")
+        logger.debug("ClusterSemantic: no embed_fn => fallback RecursiveToken")
         return recursive_token_chunker(doc, chunk_size=chunk_size, overlap=overlap)
 
     sentences = _sentence_split(doc["text"])
@@ -700,9 +702,9 @@ def overlapping_chunker(
     overlap: int = 200,
 ) -> list[dict]:
     """
-    Overlapping / SlidingWindow chunker (paper Section 3.3) — FixedToken với
-    overlap bắt buộc, cắt tại ranh giới từ.
-    Paper test (400,200) và (800,400) — nguồn chính gây redundancy.
+    Overlapping / SlidingWindow chunker (paper Section 3.3) — FixedToken with
+    mandatory overlap, split at word boundaries.
+    Paper tests (400,200) and (800,400) — the main source of redundancy.
     """
     if overlap >= chunk_size:
         overlap = chunk_size // 4
